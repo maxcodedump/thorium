@@ -1,0 +1,88 @@
+services:
+  tor:
+    container_name: tor-obfs4
+    restart: always
+    image: tor-obfs4-local-image:latest
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM alpine:latest
+        # Install Tor, lyrebird (formerly obfs4proxy) and curl for healthcheck
+        RUN apk add --no-cache tor lyrebird curl
+        # Make sure permissions are correct for the tor user
+        RUN chown -R tor:root /etc/tor /var/lib/tor
+        # Expose Tor SOCKS5 proxy port
+        EXPOSE 9050
+        # Run as non-privileged tor user
+        USER tor
+        # Start Tor
+        CMD ["tor", "-f", "/etc/tor/torrc"]
+    ports:
+      - "9050:9050"
+    configs:
+      - source: tor_config_strings
+        target: /etc/tor/torrc
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+          cpus: '0.1'
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s --socks5-hostname localhost:9050 https://check.torproject.org | tr '\\n' ' ' | grep -Eo '<title>.*</title>' | grep -q 'Congratulations'"]
+      interval: 300s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+
+  privoxy:
+    container_name: privoxy-tor
+    restart: always
+    image: privoxy-tor-local-image:latest
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM alpine:latest
+        # Install privoxy without caching the package index to keep the image small and curl for healthcheck
+        RUN apk --no-cache add privoxy curl
+        # Expose the default Privoxy port
+        EXPOSE 8118
+        # Run Privoxy in the foreground as the default unprivileged 'privoxy' user
+        USER privoxy
+        # Start privoxy using the default configuration file
+        CMD ["privoxy", "--no-daemon", "/etc/privoxy/config"]
+    ports:
+      - "8118:8118"
+    configs:
+      - source: privoxy_config_strings
+        target: /etc/privoxy/config
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -x http://localhost:8118 https://check.torproject.org | tr '\\n' ' ' | grep -Eo '<title>.*</title>' | grep -q 'Congratulations'"]
+      interval: 300s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      tor:
+        condition: service_healthy
+
+configs:
+  tor_config_strings:
+    content: |
+      # Run as a regular SOCKS5 client proxy open to the local Docker network
+      SocksPort 0.0.0.0:9050
+      Log notice stdout
+      ExcludeExitNodes {ir}, {kp}, {ru}, {by}, {ua}, {cn}
+      # Enable Pluggable Transports
+      UseBridges 1
+      # Path to the lyrebird (obfs4) executable
+      ClientTransportPlugin obfs4 exec /usr/bin/lyrebird
+      # Bridges (Get fresh ones from https://bridges.torproject.org/)
+      Bridge <string for bridge #1>
+      Bridge <string for bridge #2>
+  privoxy_config_strings:
+    content: |
+      listen-address  0.0.0.0:8118
+      forward-socks5t / tor:9050 .
